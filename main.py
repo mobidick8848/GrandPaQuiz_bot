@@ -72,7 +72,9 @@ class Quiz(StatesGroup):
     name = State()
     quiz = State()
 
-router = types.Router()
+from aiogram import Router
+router = Router ()
+
 
 # --- Keyboards ---
 def kb_start():
