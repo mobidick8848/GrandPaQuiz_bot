@@ -87,12 +87,11 @@ def kb_single(opts, qid):
     ])
 
 def kb_multi(opts, qid, sel: Set[int]):
-    rows = [[InlineKeyboardButton(text=("☑ " if i in sel else "☐ ") + o, callback_data=f"m:{qid}:{i}")]
-            for i, o in enumerate(opts)]
-    rows += [
-        [InlineKeyboardButton(text="✅ Готово", callback_data=f"ms:{qid}")],
-        [InlineKeyboardButton(text="↩ Очистить выбор", callback_data=f"mc:{qid}")]
-    ]
+    rows = []
+    for i, o in enumerate(opts):
+        mark = "✅ " if i in sel else ""
+        rows.append([InlineKeyboardButton(text=f"{mark}{o}", callback_data=f"m:{qid}:{i}")])
+    rows.append([InlineKeyboardButton(text="➡️ Готово", callback_data=f"m_done:{qid}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 # --- Handlers ---
