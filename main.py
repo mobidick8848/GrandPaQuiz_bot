@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-GrandPaQuiz_bot_web — Telegram quiz for grandpa Sergey 🎂
+GrandPaQuiz_bot_web — Telegram quiz for grandpa Sergey 🎉
 aiogram 3.x | Webhook-mode for Render Web Service
 """
+
 import os
 import json
 import asyncio
@@ -11,14 +13,20 @@ from datetime import datetime
 from typing import List, Dict, Any, Set
 
 from aiohttp import web
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    CallbackQuery,
+    Message
+)
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
 # --- CONFIG ---
 TOKEN = os.getenv("BOT_TOKEN")
@@ -33,25 +41,20 @@ def load_questions(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def reset_results(path: str):
+def load_results(path: str) -> List[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_results(path: str, results: List[Dict[str, Any]]):
     with open(path, "w", encoding="utf-8") as f:
-        json.dump([], f, ensure_ascii=False, indent=2)
+        json.dump(results, f, ensure_ascii=False, indent=2)
 
-def save_result(path: str, record: Dict[str, Any]):
-    try:
-        data = json.load(open(path, "r", encoding="utf-8"))
-    except Exception:
-        data = []
-    data.append(record)
-    json.dump(data, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-
-def leaderboard_text(path: str, top: int = 10) -> str:
-    try:
-        results = json.load(open(path, "r", encoding="utf-8"))
-    except Exception:
-        return "Пока нет результатов."
+def get_leaderboard(path: str, top_n: int) -> str:
+    results = load_results(path)
     if not results:
-        return "Пока нет результатов."
+        return "Пока нет результатов 😅"
     best = {}
     for r in results:
         n = r.get("name", "Без имени")
@@ -60,10 +63,11 @@ def leaderboard_text(path: str, top: int = 10) -> str:
         if n not in best or s > best[n]["score"]:
             best[n] = {"score": s, "total": t}
     table = sorted(best.items(), key=lambda kv: (-kv[1]["score"], kv[0].lower()))
-    lines = ["🏆 Рейтинг:", ""]
-    for i, (n, st) in enumerate(table[:top], 1):
+    lines = ["🏆 Рейтинг:\n"]
+    for i, (n, st) in enumerate(table[:top_n], 1):
         lines.append(f"{i}. {n} — {st['score']}/{st['total']}")
     return "\n".join(lines)
+
 
 questions = load_questions(QUESTIONS_FILE)
 
@@ -72,8 +76,7 @@ class Quiz(StatesGroup):
     name = State()
     quiz = State()
 
-from aiogram import Router
-router = Router ()
+router = Router()
 
 # --- Keyboards ---
 def kb_start():
@@ -94,122 +97,90 @@ def kb_multi(opts, qid, sel: Set[int]):
     rows.append([InlineKeyboardButton(text="➡️ Готово", callback_data=f"m_done:{qid}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# --- Handlers ---
+# --- Bot logic ---
 @router.message(CommandStart())
-async def start_cmd(msg: types.Message):
-    await msg.answer(
-        "🎂 Привет! Это викторина про дедушку Серёжу 🎉\n"
-        "Кто знает его лучше всех? 🏆",
-        reply_markup=kb_start()
-    )
+async def cmd_start(msg: Message, state: FSMContext):
+    await msg.answer("🎂 Привет! Это викторина про дедушку Серёжу 🎉\nКто знает его лучше всех? 🏆", reply_markup=kb_start())
 
 @router.callback_query(F.data == "start_quiz")
-async def begin(cb: CallbackQuery, state: FSMContext):
+async def start_quiz(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Как тебя зовут, герой? 😊")
     await state.set_state(Quiz.name)
-    await cb.message.answer("Как тебя зовут, герой? 😊")
-    await cb.answer()
 
 @router.message(Quiz.name)
-async def got_name(msg: types.Message, state: FSMContext):
-    await state.update_data(name=msg.text.strip(), score=0, qid=0, multi={})
-    await msg.answer(f"Отлично, {msg.text.strip()}! Поехали 🚀")
-    await ask_next(msg.chat.id, state)
+async def set_name(msg: Message, state: FSMContext):
+    name = msg.text.strip()
+    await state.update_data(name=name, score=0, current_q=0)
+    await msg.answer(f"Отлично, {name}! Поехали 🚀")
+    await send_next_question(msg, state, 0)
 
-async def ask_next(cid: int, state: FSMContext):
+async def send_next_question(msg_or_cb, state: FSMContext, qid: int):
     data = await state.get_data()
-    qid = data.get("qid", 0)
     if qid >= len(questions):
-        name, score = data["name"], data["score"]
-        total = sum(len(q["answer_index"]) if q["type"] == "multi" else 1 for q in questions)
-        save_result(RESULTS_FILE, {"name": name, "score": score, "total": total, "ts": datetime.now().isoformat()})
-        bot: Bot = state.bot  # type: ignore
-        await bot.send_message(cid, f"🎉 {name}, ты набрал <b>{score}</b> из <b>{total}</b> баллов! 💯",
-                               parse_mode=ParseMode.HTML)
-        await bot.send_message(cid, leaderboard_text(RESULTS_FILE, LEADERS_TOP_N))
+        score = data.get("score", 0)
+        name = data.get("name", "Без имени")
+        results = load_results(RESULTS_FILE)
+        results.append({"name": name, "score": score, "total": len(questions)})
+        save_results(RESULTS_FILE, results)
+        await msg_or_cb.answer(f"✅ Викторина окончена!\nТы набрал {score}/{len(questions)}.\n\n{get_leaderboard(RESULTS_FILE, LEADERS_TOP_N)}")
         await state.clear()
         return
     q = questions[qid]
-    text = f"Вопрос {qid+1}/{len(questions)}\n\n<b>{q['question']}</b>"
-    bot: Bot = state.bot  # type: ignore
+    await state.update_data(current_q=qid)
     if q["type"] == "single":
-        await bot.send_message(cid, text, reply_markup=kb_single(q["options"], qid), parse_mode=ParseMode.HTML)
+        await msg_or_cb.answer(q["question"], reply_markup=kb_single(q["options"], qid))
     else:
-        multi = data.get("multi", {}).get(str(qid), [])
-        await bot.send_message(cid, text + "\n(можно несколько вариантов)",
-                               reply_markup=kb_multi(q["options"], qid, set(multi)), parse_mode=ParseMode.HTML)
+        await state.update_data(sel=[])
+        await msg_or_cb.answer(q["question"], reply_markup=kb_multi(q["options"], qid, set()))
 
-# --- Single / Multi ---
+# --- SINGLE ---
 @router.callback_query(F.data.startswith("s:"))
-async def single(cb: CallbackQuery, state: FSMContext):
-    _, qid, opt = cb.data.split(":")
-    qid, opt = int(qid), int(opt)
-    data = await state.get_data()
-    if qid != data.get("qid", 0): return await cb.answer("Уже пройдено 🙂")
+async def single_answer(callback: CallbackQuery, state: FSMContext):
+    _, qid, idx = callback.data.split(":")
+    qid, idx = int(qid), int(idx)
     q = questions[qid]
-    right = (opt == q["answer_index"])
-    sc = data["score"] + (1 if right else 0)
-    await state.update_data(score=sc, qid=qid + 1)
-    mark = "✅" if right else "❌"
-    txt = (f"<b>{q['question']}</b>\n\nТы выбрал: {q['options'][opt]} {mark}\n"
-           f"Правильный ответ: {q['options'][q['answer_index']]}")
-    await cb.message.edit_text(txt, parse_mode=ParseMode.HTML)
-    await cb.answer()
-    await ask_next(cb.message.chat.id, state)
+    data = await state.get_data()
+    score = data.get("score", 0)
+    if idx == q["answer_index"]:
+        score += 1
+    await state.update_data(score=score)
+    await send_next_question(callback.message, state, qid + 1)
 
+# --- MULTI ---
 @router.callback_query(F.data.startswith("m:"))
-async def toggle(cb: CallbackQuery, state: FSMContext):
-    _, qid, opt = cb.data.split(":")
-    qid, opt = int(qid), int(opt)
+async def multi_select(callback: CallbackQuery, state: FSMContext):
+    qid = int(callback.data.split(":")[1])
+    idx = int(callback.data.split(":")[2])
     data = await state.get_data()
-    if qid != data.get("qid", 0): return await cb.answer("Уже пройдено 🙂")
-    multi = data.get("multi", {})
-    sel = set(multi.get(str(qid), []))
-    sel.remove(opt) if opt in sel else sel.add(opt)
-    multi[str(qid)] = list(sorted(sel))
-    await state.update_data(multi=multi)
-    await cb.message.edit_reply_markup(reply_markup=kb_multi(questions[qid]["options"], qid, sel))
-    await cb.answer("Выбор обновлён")
-
-@router.callback_query(F.data.startswith("mc:"))
-async def clear_multi(cb: CallbackQuery, state: FSMContext):
-    _, qid = cb.data.split(":")
-    qid = int(qid)
-    data = await state.get_data()
-    if qid != data.get("qid", 0): return await cb.answer("Уже пройдено 🙂")
-    multi = data.get("multi", {})
-    multi[str(qid)] = []
-    await state.update_data(multi=multi)
-    await cb.message.edit_reply_markup(reply_markup=kb_multi(questions[qid]["options"], qid, set()))
-    await cb.answer("Очищено")
-
-@router.callback_query(F.data.startswith("ms:"))
-async def submit_multi(cb: CallbackQuery, state: FSMContext):
-    _, qid = cb.data.split(":")
-    qid = int(qid)
-    data = await state.get_data()
-    if qid != data.get("qid", 0): return await cb.answer("Уже пройдено 🙂")
+    sel = set(data.get("sel", []))
+    if idx in sel:
+        sel.remove(idx)
+    else:
+        sel.add(idx)
+    await state.update_data(sel=list(sel))
     q = questions[qid]
-    corr, sel = set(q["answer_index"]), set(data.get("multi", {}).get(str(qid), []))
-    gain = len(corr & sel)
-    sc = data["score"] + gain
-    await state.update_data(score=sc, qid=qid + 1)
-    txt = (f"<b>{q['question']}</b>\n\n"
-           f"Ты выбрал: {', '.join(q['options'][i] for i in sel) or 'ничего'}\n"
-           f"Правильные: {', '.join(q['options'][i] for i in corr)}\n"
-           f"+{gain} балл(ов)")
-    await cb.message.edit_text(txt, parse_mode=ParseMode.HTML)
-    await cb.answer()
-    await ask_next(cb.message.chat.id, state)
+    await callback.message.edit_text(
+        q["question"],
+        reply_markup=kb_multi(q["options"], qid, sel)
+    )
 
-@router.message(Command("leaders"))
-async def leaders(msg: types.Message):
-    await msg.answer(leaderboard_text(RESULTS_FILE, LEADERS_TOP_N))
+@router.callback_query(F.data.startswith("m_done:"))
+async def multi_done(callback: CallbackQuery, state: FSMContext):
+    qid = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    sel = set(data.get("sel", []))
+    q = questions[qid]
+    correct = set(q["answer_index"])
+    score = data.get("score", 0)
+    if sel == correct:
+        score += 1
+    await state.update_data(score=score, sel=[])
+    await send_next_question(callback.message, state, qid + 1)
 
-# --- RUN ---
+
+# --- WEBHOOK SETUP ---
 async def on_startup(bot: Bot):
-    reset_results(RESULTS_FILE)
     await bot.set_webhook(WEBHOOK_URL)
-    print("Webhook set to:", WEBHOOK_URL)
 
 async def on_shutdown(bot: Bot):
     await bot.delete_webhook()
@@ -220,18 +191,19 @@ async def main():
     dp.include_router(router)
     app = web.Application()
     app["bot"] = bot
+
     dp.startup.register(lambda: on_startup(bot))
     dp.shutdown.register(lambda: on_shutdown(bot))
-   
-    from aiogram.webhook.aiohttp_server import SimpleRequestHandler
+
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
-    
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
-    print("🚀 GrandPaQuiz_bot_web running on port", PORT)
+    print(f"🚀 GrandPaQuiz_bot_web running on port {PORT}")
     await site.start()
     await asyncio.Event().wait()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
