@@ -224,7 +224,10 @@ async def main():
     app["bot"] = bot
     dp.startup.register(lambda: on_startup(bot))
     dp.shutdown.register(lambda: on_shutdown(bot))
-    app.router.add_post("/webhook", dp.webhook_handler)
+   
+    from aiogram.webhook.aiohttp_server import SimpleRequestHandler
+    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
+    
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
