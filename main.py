@@ -50,8 +50,7 @@ def get_leaderboard(path: str, top_n: int) -> str:
         if n not in best or s > best[n]["score"]:
             best[n] = {"score": s, "total": t}
     table = sorted(best.items(), key=lambda kv: (-kv[1]["score"], kv[0].lower()))
-    lines = ["🏆 Рейтинг:
-"]
+    lines = ["🏆 Рейтинг:"]
     for i, (n, st) in enumerate(table[:top_n], 1):
         lines.append(f"{i}. {n} — {st['score']}/{st['total']}")
     return "\n".join(lines)
