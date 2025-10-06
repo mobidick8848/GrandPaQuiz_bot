@@ -75,7 +75,6 @@ class Quiz(StatesGroup):
 from aiogram import Router
 router = Router ()
 
-
 # --- Keyboards ---
 def kb_start():
     return InlineKeyboardMarkup(inline_keyboard=[
